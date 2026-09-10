@@ -72,7 +72,10 @@ const LiveChart = ({ historyData }) => {
     Temperature: { label: 'Temperature (°C)', key: 'temperature_trend', color: '#2563EB', unit: '°C', minClamp: 55, maxClamp: 85, minSpan: 6, type: 'temperature', dtick: 2, minorDtick: 0.5 },
     Vibration: { label: 'Vibration RMS (mm/s)', key: 'vibration_trend', color: '#2563EB', unit: 'mm/s', minClamp: 0, maxClamp: 6, minSpan: 1, type: 'vibration', dtick: 0.5, minorDtick: 0.1 },
     Motor_Current: { label: 'Motor Current (A)', key: 'motor_current_trend', color: '#2563EB', unit: 'A', minClamp: 5, maxClamp: 25, minSpan: 3, type: 'current', dtick: 2, minorDtick: 0.5 },
+    Pressure: { label: 'Pressure (bar)', key: 'pressure_trend', color: '#2563EB', unit: 'bar', minClamp: 1, maxClamp: 12, minSpan: 2, type: 'pressure', dtick: 1, minorDtick: 0.2 },
+    Noise: { label: 'Acoustic Noise (dB)', key: 'noise_trend', color: '#2563EB', unit: 'dB', minClamp: 30, maxClamp: 90, minSpan: 10, type: 'noise', dtick: 5, minorDtick: 1 },
   };
+
 
   const config = metricConfigs[selectedMetric] || metricConfigs.Temperature;
   const trend = historyData?.[config.key] || { actual: [], predicted_future: [] };
@@ -188,7 +191,10 @@ const LiveChart = ({ historyData }) => {
               <option value="Temperature">Temperature (°C)</option>
               <option value="Vibration">Vibration RMS (mm/s)</option>
               <option value="Motor_Current">Motor Current (A)</option>
+              <option value="Pressure">Pressure (bar)</option>
+              <option value="Noise">Acoustic Noise (dB)</option>
             </select>
+
           </div>
         </div>
       </div>

@@ -33,6 +33,7 @@ const TopBar = ({ backendStatus, statusData }) => {
           <ShieldCheck className="w-4 h-4 text-emerald-400" />
           <span>{statusData?.model || 'Random Forest Regressor'}</span>
         </div>
+
         <div className="flex items-center space-x-1.5 text-slate-300 font-mono">
           <Clock className="w-4 h-4 text-slate-400" />
           <span>{timeStr}</span>

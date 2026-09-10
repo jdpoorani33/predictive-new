@@ -10,8 +10,13 @@ export const getStatus = async () => {
   return res.data;
 };
 
-export const getCurrentData = async () => {
-  const res = await api.get('/current');
+export const getPlcsData = async () => {
+  const res = await api.get('/plcs');
+  return res.data;
+};
+
+export const getCurrentData = async (plc_id = 1) => {
+  const res = await api.get('/current', { params: { plc_id } });
   return res.data;
 };
 
@@ -38,14 +43,14 @@ export const getModelMetrics = async () => {
   }
 };
 
-
-export const getRecentLogs = async () => {
-  const res = await api.get('/logs');
+export const getRecentLogs = async (plc_id = null) => {
+  const params = plc_id ? { plc_id } : {};
+  const res = await api.get('/logs', { params });
   return res.data;
 };
 
-export const getMaintenanceData = async () => {
-  const res = await api.get('/maintenance');
+export const getMaintenanceData = async (plc_id = 1) => {
+  const res = await api.get('/maintenance', { params: { plc_id } });
   return res.data;
 };
 

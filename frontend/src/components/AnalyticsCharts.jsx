@@ -150,8 +150,8 @@ const AnalyticsCharts = ({ historyData }) => {
 
   return (
     <div className="space-y-4">
-      {/* 2 Column Grid for Temp, Vib, Current, Health */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      {/* Multi-Sensor Grid: Temperature, Vibration, Motor Current, Pressure, Noise, Machine Health */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         <SingleTrendPlot
           title="Temperature Trend"
           yLabel="°C"
@@ -192,6 +192,32 @@ const AnalyticsCharts = ({ historyData }) => {
           minorDtick={0.5}
         />
         <SingleTrendPlot
+          title="Pressure Trend"
+          yLabel="bar"
+          trendData={historyData?.pressure_trend}
+          actualColor="#2563EB"
+          degradationDay={degradationDay}
+          minClamp={1}
+          maxClamp={12}
+          minSpan={2}
+          metricType="pressure"
+          dtick={1}
+          minorDtick={0.2}
+        />
+        <SingleTrendPlot
+          title="Acoustic Noise Trend"
+          yLabel="dB"
+          trendData={historyData?.noise_trend}
+          actualColor="#2563EB"
+          degradationDay={degradationDay}
+          minClamp={30}
+          maxClamp={90}
+          minSpan={10}
+          metricType="noise"
+          dtick={5}
+          minorDtick={1}
+        />
+        <SingleTrendPlot
           title="Machine Health Trend"
           yLabel="%"
           trendData={historyData?.machine_health_trend}
@@ -203,6 +229,7 @@ const AnalyticsCharts = ({ historyData }) => {
           metricType="health"
         />
       </div>
+
 
       {/* Full Width RUL Trend */}
       <SingleTrendPlot

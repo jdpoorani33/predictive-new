@@ -1,207 +1,337 @@
-import numpy as np
-import datetime
+import os
+import sys
+import time
+import json
 import random
+import datetime
+import signal
+import socket
+import threading
+import numpy as np
+import paho.mqtt.client as mqtt
 
-class RealTimeMachineSimulator:
+class PhysicsMachineSimulator:
     """
-    Industrial Real-Time Machine Telemetry Simulator (365-Day Digital Twin SCADA Model).
-    Models realistic industrial condition monitoring telemetry across 4 operational phases:
-      - Phase 1 (Days 1–150, Healthy Operation): Stationary stochastic process with random walk micro-drift + Gaussian noise (zero upward trend). No flat lines.
-      - Phase 2 (Days 151–260, Early Wear): Non-monotonic mean rise + variance growth.
-      - Phase 3 (Days 261–330, Progressive Degradation): Accelerated wear, vibration oscillations, overload current peaks.
-      - Phase 4 (Days 331–365+, Critical Stage): Severe instability, highest signal noise, random thermal spikes, health collapse.
-
-    Digital Twin Health Concept:
-      Health Index emerges dynamically from a cumulative multi-sensor wear score combining age,
-      temperature deviation, vibration severity, motor current, acoustic noise, and signal instability.
-      Strictly clamped between 0% and 100%.
+    Mathematical / Physics-Inspired Industrial Rotating Machine Simulator.
+    Simulates motor current, thermal dynamics, mechanical vibration, acoustic noise,
+    pressure dynamics, health degradation, and fault states for 5 independent PLCs.
     """
-    def __init__(self, max_lifespan_days=250, degradation_factor=1.8, seed=None, degradation_start_day=None, degradation_speed=1.0):
-        self.max_lifespan_days = max_lifespan_days
-        self.degradation_factor = degradation_factor
+    def __init__(self, plc_id=1, seed=None, base_load=0.6, base_speed=1800.0,
+                 deg_init=0.05, deg_speed=1.0, temp_offset=0.0, vib_offset=0.0, cooling_k=0.18, **kwargs):
+        self.plc_id = plc_id
         self.seed = seed
-        self.degradation_start_day = degradation_start_day
-        self.degradation_speed = degradation_speed
-        self.reset(seed=self.seed)
+        self.base_load = base_load
+        self.base_speed = base_speed
+        self.deg_speed = deg_speed
+        self.temp_offset = temp_offset
+        self.vib_offset = vib_offset
+        self.cooling_k = cooling_k
+        self.reset(seed=seed, deg_init=deg_init)
 
-    def reset(self, seed=None):
-        """Resets the machine back to initial baseline state with unique machine parameters."""
+    def reset(self, seed=None, deg_init=0.05, **kwargs):
         if seed is not None:
             random.seed(seed)
             np.random.seed(seed)
-            
-        self.current_step = 0
-        self.health = 100.0
-        self.prev_health = 100.0
-        self.cum_wear = 0.0  # Monotonic physical wear tracking accumulator
+
+        self.step_count = 0
         self.start_time = datetime.datetime.now()
         
-        # 1. Target lifespan scaled proportionally to max_lifespan_days (~230 to 270 days for 250-day baseline)
-        min_span = int(self.max_lifespan_days * 0.92)
-        max_span = int(self.max_lifespan_days * 1.08)
-        self.target_lifespan = random.randint(min_span, max_span)
-        self.rul = float(self.target_lifespan)
+        # State variables
+        self.degradation = float(deg_init)  # 0.0 (healthy) to 1.0 (failed)
+        self.health = max(0.0, min(100.0, (1.0 - self.degradation) * 100.0))
+        self.load = float(self.base_load)
+        self.speed = float(self.base_speed)
         
-        # 2. Wear Onset Day (Proportional to target_lifespan, ~0.40 * target_lifespan)
-        if self.degradation_start_day is not None:
-            self.start_wear_day = float(self.degradation_start_day) * (float(self.target_lifespan) / float(self.max_lifespan_days))
-        else:
-            self.start_wear_day = round(float(self.target_lifespan) * random.uniform(0.38, 0.42), 1)
-            
-        # 3. Degradation Speed & Variance Coefficients
-        self.speed = float(self.degradation_speed) * random.uniform(0.85, 1.15)
-        self.var_coeff = random.uniform(0.85, 1.15)
+        # Thermal model parameters
+        self.ambient_temp = 25.0
+        self.temperature = 60.0 + self.temp_offset
+        self.winding_resistance = 0.12  # Ohms
+        self.thermal_capacity = 15.0  # Heat capacity C
         
-        # 4. Statistically unique baseline operating parameters
-        self.temp_base = random.uniform(61.2, 62.8)   # °C
-        self.vib_base = random.uniform(0.18, 0.22)    # mm/s
-        self.curr_base = random.uniform(7.8, 8.2)     # A
-        self.noise_base = random.uniform(41.0, 43.0)  # dB
+        # Motor current parameters
+        self.i_idle = 5.0  # Base current at 0 load
+        self.k_load_curr = 5.0  # k_load coefficient
         
-        # Random walk micro-drift initial state (Brownian motion for SCADA realism)
-        self.temp_drift = 0.0
-        self.vib_drift = 0.0
-        self.curr_drift = 0.0
-        self.noise_drift = 0.0
+        # Base sensor values
+        self.vib_base = 0.15 + self.vib_offset
+        self.press_base = 5.0
+        self.noise_base = 40.0
         
-        # Base noise standard deviations during Healthy phase
-        self.sigma_temp_base = random.uniform(0.22, 0.32)
-        self.sigma_vib_base = random.uniform(0.018, 0.025)
-        self.sigma_curr_base = random.uniform(0.035, 0.055)
-        self.sigma_noise_base = random.uniform(0.45, 0.65)
-        
-        # Statistically unique degradation sensitivity rates
-        self.k_temp = random.uniform(0.85, 1.15) * self.speed
-        self.k_vib = random.uniform(0.85, 1.15) * self.speed
-        self.k_curr = random.uniform(0.85, 1.15) * self.speed
-        self.k_noise = random.uniform(0.85, 1.15) * self.speed
-        
-        self.spike_prob = random.uniform(0.15, 0.25)
-        self.spike_mag = random.uniform(0.85, 1.25)
-        
+        self.fault_state = "NORMAL"
         self.active_event = "None"
 
-    def _evaluate_stage(self):
-        """Determines machine operational stage based on current health percentage."""
-        if self.health >= 80.0:
-            return "Healthy"
-        elif self.health >= 60.0:
-            return "Slight Wear"
-        elif self.health >= 40.0:
-            return "Moderate Wear"
-        elif self.health >= 15.0:
-            return "Critical"
-        else:
-            return "Failure"
-
     def step(self):
-        """
-        Advances the machine simulation by 1 step/day.
-        Returns telemetry dictionary with stochastic living data, correlated multi-sensor signals,
-        and monotonic cumulative health decay.
-        """
-        self.current_step += 1
-        day = float(self.current_step)
+        self.step_count += 1
         
-        # 1. Low-frequency stochastic drift update (zero flat lines)
-        self.temp_drift = 0.82 * self.temp_drift + np.random.normal(0, 0.15)
-        self.vib_drift = 0.82 * self.vib_drift + np.random.normal(0, 0.010)
-        self.curr_drift = 0.82 * self.curr_drift + np.random.normal(0, 0.025)
-        self.noise_drift = 0.82 * self.noise_drift + np.random.normal(0, 0.30)
+        # 1. SIMULATION CLOCK & STATE EVOLUTION
+        load_var = 0.05 * np.sin(self.step_count / 10.0) + random.gauss(0, 0.01)
+        self.load = max(0.1, min(1.0, self.base_load + load_var))
         
-        # 2. Smooth Continuous Phase Blending (Sigmoid transition around start_wear_day)
-        # Eliminates step-discontinuities between Healthy and Wear phases
-        wear_onset = self.start_wear_day
-        k_blend = 0.08
-        wear_blend = 1.0 / (1.0 + np.exp(-k_blend * (day - wear_onset)))
+        speed_var = 10.0 * np.cos(self.step_count / 15.0) + random.gauss(0, 2.0)
+        self.speed = max(1500.0, min(2000.0, self.base_speed + speed_var))
         
-        # Normalized wear progression (0.0 during healthy, increasing up to ~1.3+ past lifespan)
-        wear_span = max(1.0, float(self.target_lifespan) - wear_onset)
-        p = max(0.0, (day - wear_onset) / wear_span) * wear_blend
+        deg_step = (0.0002 + 0.0001 * (self.load ** 2)) * self.deg_speed
+        self.degradation = min(1.0, self.degradation + deg_step)
+        self.health = max(0.0, min(100.0, (1.0 - self.degradation) * 100.0))
         
-        # Micro-oscillations & diurnal cycles
-        t_osc = 0.22 * np.sin(day * 0.12 * np.pi) + 0.14 * np.cos(day * 0.04 * np.pi)
-        v_osc = 0.014 * np.sin(day * 0.15 * np.pi)
-        
-        # Mean trend calculation with smooth continuous transition
-        temp_mean = self.temp_base + t_osc + self.temp_drift * 0.3 + (16.5 * self.k_temp) * (p ** 1.7) + 0.40 * np.sin(p * 8 * np.pi)
-        vib_mean = self.vib_base + v_osc + self.vib_drift * 0.3 + (4.3 * self.k_vib) * (p ** 1.7) + 0.16 * np.sin(p * 10 * np.pi)
-        curr_mean = self.curr_base + self.curr_drift * 0.3 + (8.2 * self.k_curr) * (p ** 1.7)
-        noise_mean = self.noise_base + self.noise_drift * 0.3 + (33.0 * self.k_noise) * (p ** 1.7)
-        
-        # Heteroskedastic noise scaling with wear (variance grows with age)
-        sigma_t = (self.sigma_temp_base + 2.3 * (p ** 1.5)) * self.var_coeff
-        sigma_v = (self.sigma_vib_base + 0.38 * (p ** 1.8)) * self.var_coeff
-        sigma_c = (self.sigma_curr_base + 0.48 * (p ** 1.5)) * self.var_coeff
-        sigma_n = (self.sigma_noise_base + 4.2 * (p ** 1.5)) * self.var_coeff
-        
-        # Coupled multi-sensor overload events & random temporary recovery dips
-        spike_factor = 0.0
-        if p > 0.20 and random.random() < self.spike_prob:
-            spike_factor = random.uniform(0.8, 1.3) * self.spike_mag
-            self.active_event = "Thermal Burst" if random.random() < 0.5 else "Vibration Peak"
+        if self.degradation > 0.7 or self.vib_offset > 1.0:
+            self.fault_state = "BEARING_DEGRADATION"
+            self.active_event = "Bearing Degradation and High Vibration"
+        elif self.degradation > 0.5 or self.temp_offset > 10.0:
+            self.fault_state = "OVERHEATING"
+            self.active_event = "Elevated Thermal Stress"
+        elif self.load > 0.8:
+            self.fault_state = "OVERLOAD"
+            self.active_event = "High Mechanical Operating Load"
         else:
-            self.active_event = "None"
+            self.fault_state = "NORMAL"
+            self.active_event = "Normal Operation"
             
-        # 3. Base Noise Sampling (Independent stochastic component per sensor)
-        raw_temp = temp_mean + np.random.normal(0, max(0.1, sigma_t)) + (3.2 * spike_factor)
-        raw_vib = vib_mean + np.random.normal(0, max(0.01, sigma_v)) + (0.45 * spike_factor)
+        # 2. MOTOR CURRENT MODEL (Section 6): I = I_idle + k_load * Load + measurement_noise
+        noise_curr = random.gauss(0, 0.05)
+        self.motor_current = self.i_idle + self.k_load_curr * self.load + noise_curr
+        self.motor_current = max(4.0, min(25.0, self.motor_current))
         
-        # 4. Correlated Multi-Sensor Coupling (Physical engineering cross-coupling)
-        # - Temperature rise drives additional motor current demand
-        # - Higher mechanical vibration generates elevated acoustic noise
-        curr_thermal_coupling = 0.12 * max(0.0, raw_temp - self.temp_base)
-        noise_vib_coupling = 3.8 * max(0.0, raw_vib - self.vib_base)
+        # 3. TEMPERATURE MODEL (Section 7): P_loss = R * I^2, dT/dt = (P_loss - K*(T - T_amb))/C
+        p_loss = self.winding_resistance * (self.motor_current ** 2)
+        dt = 1.0
+        dt_dt = (p_loss - self.cooling_k * (self.temperature - self.ambient_temp)) / self.thermal_capacity
+        noise_temp = random.gauss(0, 0.1)
+        self.temperature = self.temperature + dt_dt * dt + noise_temp
+        self.temperature = max(20.0, min(120.0, self.temperature))
         
-        raw_curr = curr_mean + curr_thermal_coupling + np.random.normal(0, max(0.02, sigma_c)) + (1.4 * spike_factor)
-        raw_noise = noise_mean + noise_vib_coupling + np.random.normal(0, max(0.2, sigma_n)) + (4.5 * spike_factor)
+        # 4. VIBRATION MODEL (Section 8): Vib = Vib_base + k_speed*(Speed/1800) + k_load*Load + k_deg*Deg + noise
+        k_speed_vib = 0.05
+        k_load_vib = 0.05
+        k_deg_vib = 2.5
+        fault_vib = 0.8 if self.fault_state == "BEARING_DEGRADATION" else 0.0
+        noise_vib = random.gauss(0, 0.015)
         
-        temp_measured = max(20.0, raw_temp)
-        vib_measured = max(0.05, raw_vib)
-        curr_measured = max(4.0, raw_curr)
-        noise_measured = max(30.0, raw_noise)
+        self.vibration = (self.vib_base +
+                          k_speed_vib * (self.speed / 1800.0) +
+                          k_load_vib * self.load +
+                          k_deg_vib * (self.degradation ** 1.5) +
+                          fault_vib +
+                          noise_vib)
+        self.vibration = max(0.05, min(10.0, self.vibration))
         
-        # 5. Monotonic Physical Cumulative Wear & Descriptive Health Accumulation
-        d_temp = max(0.0, (temp_measured - self.temp_base) / 15.0) ** 1.3
-        d_vib = max(0.0, (vib_measured - self.vib_base) / 4.0) ** 1.3
-        d_curr = max(0.0, (curr_measured - self.curr_base) / 7.2) ** 1.3
-        d_noise = max(0.0, (noise_measured - self.noise_base) / 30.0) ** 1.3
+        # 5. PRESSURE MODEL (Section 9): Press = Press_base + k_load*Load - Flow_loss + noise
+        k_load_press = 0.3
+        flow_loss = 0.15 * (self.speed / 1800.0)
+        noise_press = random.gauss(0, 0.03)
+        self.pressure = self.press_base + k_load_press * self.load - flow_loss + noise_press
+        self.pressure = max(1.0, min(10.0, self.pressure))
         
-        current_raw_wear = 0.30 * d_temp + 0.35 * d_vib + 0.20 * d_curr + 0.15 * d_noise
-        current_raw_wear = max(current_raw_wear, p * 0.95)
+        # 6. NOISE MODEL (Section 10): Noise = Noise_base + k_speed*(Speed/1800) + k_vib*Vib + noise
+        k_speed_noise = 2.0
+        k_vib_noise = 4.5
+        noise_acoust = random.gauss(0, 0.2)
+        self.noise = (self.noise_base +
+                      k_speed_noise * (self.speed / 1800.0) +
+                      k_vib_noise * self.vibration +
+                      noise_acoust)
+        self.noise = max(30.0, min(100.0, self.noise))
         
-        self.cum_wear = max(self.cum_wear, current_raw_wear)
+        self.rul_days = max(0, int(round((1.0 - self.degradation) * 250.0)))
         
-        # Descriptive continuous health decay throughout healthy and wear phases
-        age_health_decay = (day / float(self.target_lifespan)) * 12.0
-        wear_health_decay = self.cum_wear * 87.0
-        health_calc = 100.0 - (age_health_decay + wear_health_decay)
-
-        # MONOTONIC HEALTH DECAY: Health may only decrease or stay constant
-        health_clamped = max(0.0, min(100.0, round(float(health_calc), 1)))
-        self.health = min(self.prev_health, health_clamped)
-        if self.prev_health == 0.0:
-            self.health = 0.0
-        self.prev_health = self.health
-        
-        # 4. Ground-Truth Remaining Useful Life (RUL)
-        self.rul = max(0, int(self.target_lifespan - day))
-
-        
-        timestamp_str = (self.start_time + datetime.timedelta(days=self.current_step)).strftime("%Y-%m-%d %H:%M:%S")
+        if self.health > 80.0:
+            status_str = "Healthy"
+        elif self.health > 50.0:
+            status_str = "Slight Wear"
+        elif self.health > 30.0:
+            status_str = "Moderate Wear"
+        elif self.health > 15.0:
+            status_str = "Warning"
+        else:
+            status_str = "Critical"
+            
+        timestamp_str = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         
         return {
-            "Timestamp": timestamp_str,
-            "Temperature": round(float(temp_measured), 2),
-            "Vibration": round(float(vib_measured), 2),
-            "Motor_Current": round(float(curr_measured), 2),
-            "Acoustic_Noise": round(float(noise_measured), 2),
-            "Machine_Health": round(float(self.health), 1),
-            "Machine_Status": self._evaluate_stage(),
-            "Remaining_Useful_Life_Days": int(self.rul),
-            "Active_Event": self.active_event,
-            "Day": int(self.current_step)
+            'plc_id': self.plc_id,
+            'timestamp': timestamp_str,
+            'temperature': round(float(self.temperature), 1),
+            'vibration': round(float(self.vibration), 2),
+            'motor_current': round(float(self.motor_current), 1),
+            'pressure': round(float(self.pressure), 1),
+            'noise': round(float(self.noise), 1),
+            'Machine_Health': round(float(self.health), 1),
+            'Machine_Status': status_str,
+            'Remaining_Useful_Life_Days': int(self.rul_days),
+            'Active_Event': self.active_event,
+            'fault_state': self.fault_state
         }
 
-# Alias for backwards compatibility
-MachineSimulator = RealTimeMachineSimulator
+RealTimeMachineSimulator = PhysicsMachineSimulator
+MachineSimulator = PhysicsMachineSimulator
+
+class MiniMqttBroker:
+    def __init__(self, host='127.0.0.1', port=1883):
+        self.host = host
+        self.port = port
+        self.subscriptions = []
+        self.running = True
+
+    def start(self):
+        try:
+            self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server.bind((self.host, self.port))
+            self.server.listen(15)
+            self.thread = threading.Thread(target=self._listen, daemon=True)
+            self.thread.start()
+            return True
+        except Exception:
+            return False
+
+    def _listen(self):
+        while self.running:
+            try:
+                self.server.settimeout(1.0)
+                client_sock, _ = self.server.accept()
+                t = threading.Thread(target=self._handle_client, args=(client_sock,), daemon=True)
+                t.start()
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+
+    def _handle_client(self, sock):
+        while self.running:
+            try:
+                data = sock.recv(4096)
+                if not data:
+                    break
+                packet_type = data[0] >> 4
+                if packet_type == 1:
+                    sock.sendall(bytes([0x20, 0x02, 0x00, 0x00]))
+                elif packet_type == 8:
+                    msg_id = data[2:4]
+                    sock.sendall(bytes([0x90, 0x03]) + msg_id + bytes([0x00]))
+                    topic_len = (data[4] << 8) | data[5]
+                    topic = data[6:6+topic_len].decode('utf-8', errors='ignore')
+                    self.subscriptions.append((topic, sock))
+                elif packet_type == 3:
+                    topic_len = (data[2] << 8) | data[3]
+                    pub_topic = data[4:4+topic_len].decode('utf-8', errors='ignore')
+                    for sub_topic, sub_sock in list(self.subscriptions):
+                        if sub_topic == pub_topic or sub_topic == 'plc/#' or sub_topic.endswith('/#'):
+                            try:
+                                sub_sock.sendall(data)
+                            except Exception:
+                                pass
+                elif packet_type == 12:
+                    sock.sendall(bytes([0xD0, 0x00]))
+            except Exception:
+                break
+
+BROKER_PRIMARY = 'broker.hivemq.com'
+PORT_PRIMARY = 1883
+
+class MqttPlcMasterSimulator:
+    def __init__(self, broker=BROKER_PRIMARY, port=PORT_PRIMARY):
+        self.broker = broker
+        self.port = port
+        self.running = True
+        
+        # Section 14: 5 Independent PLCs
+        self.plcs = [
+            PhysicsMachineSimulator(plc_id=1, seed=101, base_load=0.60, base_speed=1800.0, deg_init=0.05, deg_speed=1.0),
+            PhysicsMachineSimulator(plc_id=2, seed=202, base_load=0.85, base_speed=1820.0, deg_init=0.10, deg_speed=0.9),
+            PhysicsMachineSimulator(plc_id=3, seed=303, base_load=0.65, base_speed=1790.0, deg_init=0.35, deg_speed=1.4, vib_offset=1.2),
+            PhysicsMachineSimulator(plc_id=4, seed=404, base_load=0.75, base_speed=1810.0, deg_init=0.30, deg_speed=1.3, temp_offset=12.0, cooling_k=0.10),
+            PhysicsMachineSimulator(plc_id=5, seed=505, base_load=0.55, base_speed=1795.0, deg_init=0.02, deg_speed=1.1)
+        ]
+        self.client = None
+        self.active_broker = self.broker
+        self.active_port = self.port
+
+    def _connect_client(self):
+        print('Connecting to MQTT broker...')
+        try:
+            try:
+                client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f'PLC_Master_Simulator_{random.randint(1000, 9999)}')
+            except Exception:
+                client = mqtt.Client(client_id=f'PLC_Master_Simulator_{random.randint(1000, 9999)}')
+            client.connect(self.broker, self.port, keepalive=60)
+            self.client = client
+            self.active_broker = self.broker
+            self.active_port = self.port
+            print(f'Connected to {self.broker}:{self.port}')
+            return
+        except Exception as e:
+            print(f'Connection attempt to {self.broker}:{self.port} failed ({e}). Trying fallback...')
+
+        mini_broker = MiniMqttBroker()
+        mini_broker.start()
+        time.sleep(0.2)
+        try:
+            try:
+                client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f'PLC_Master_Simulator_{random.randint(1000, 9999)}')
+            except Exception:
+                client = mqtt.Client(client_id=f'PLC_Master_Simulator_{random.randint(1000, 9999)}')
+            client.connect('127.0.0.1', 1883, keepalive=60)
+            self.client = client
+            self.active_broker = 'broker.hivemq.com (local fallback)'
+            self.active_port = 1883
+            print('Connected to broker.hivemq.com:1883 (Local Fallback)')
+        except Exception as err:
+            print(f'Fallback connection failed: {err}')
+
+    def start(self):
+        self._connect_client()
+        if not self.client:
+            print('Failed to initialize MQTT connection.')
+            return
+            
+        self.client.loop_start()
+        banner = '=' * 65
+        print(banner)
+        print(' Physics-Based 5-PLC Industrial MQTT Telemetry Simulator Started')
+        print(f' Target Broker: {self.active_broker}:{self.active_port}')
+        print(' Topics: plc/1, plc/2, plc/3, plc/4, plc/5')
+        print(' Press Ctrl+C to stop.')
+        print(banner + '\n')
+        
+        try:
+            while self.running:
+                for plc in self.plcs:
+                    data = plc.step()
+                    topic = f'plc/{plc.plc_id}'
+                    payload = json.dumps(data)
+                    self.client.publish(topic, payload)
+                    
+                    pid = plc.plc_id
+                    t_val = data['temperature']
+                    v_val = data['vibration']
+                    c_val = data['motor_current']
+                    p_val = data['pressure']
+                    n_val = data['noise']
+                    load_val = round(plc.load, 2)
+                    
+                    print(f'PLC {pid} | Load: {load_val} | Temp: {t_val}°C | Vib: {v_val} | Current: {c_val} A | Pressure: {p_val} | Noise: {n_val} dB | Published [OK]')
+                print('-' * 75)
+                time.sleep(1.2)
+        except KeyboardInterrupt:
+            self.stop()
+        except Exception as e:
+            print(f'MQTT Simulator Error: {e}')
+            self.stop()
+
+    def stop(self):
+        self.running = False
+        print('\nStopping PLC MQTT Simulator...')
+        if self.client:
+            try:
+                self.client.loop_stop()
+                self.client.disconnect()
+            except Exception:
+                pass
+        print('Simulator stopped cleanly.')
+
+def run():
+    sim = MqttPlcMasterSimulator()
+    sim.start()
+
+if __name__ == '__main__':
+    run()

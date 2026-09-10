@@ -46,18 +46,19 @@ def generate_dataset(num_machines=250, records_per_machine=365, output_path="dat
             
     df = pd.DataFrame(records)
     
-    # Reorder columns
-    cols = ["Timestamp", "Temperature", "Vibration", "Motor_Current", "Machine_Health", "Machine_Status", "Remaining_Useful_Life_Days"]
+    # Reorder columns with all 5 input features
+    cols = ["Timestamp", "Temperature", "Vibration", "Motor_Current", "Pressure", "Noise", "Machine_Health", "Machine_Status", "Remaining_Useful_Life_Days"]
     df = df[cols]
     
     # Introduce synthetic missing values (2%) for preprocessing validation
-    for col in ["Temperature", "Vibration", "Motor_Current"]:
+    for col in ["Temperature", "Vibration", "Motor_Current", "Pressure", "Noise"]:
         mask = pd.Series([True] * len(df)).sample(frac=0.02, random_state=42).index
         df.loc[mask, col] = None
         
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     df.to_csv(output_path, index=False)
     print(f"Dataset saved to {output_path}")
+
     
     # Also update data/sensor_data.csv if path exists or for compatibility
     alt_data_path = os.path.join(base_dir, "data", "sensor_data.csv")

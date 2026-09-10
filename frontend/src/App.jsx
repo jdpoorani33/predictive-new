@@ -1,12 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
 import TopBar from './components/TopBar';
 import Sidebar from './components/Sidebar';
+import CriticalAlertModal from './components/CriticalAlertModal';
 import Dashboard from './pages/Dashboard';
 import Analytics from './pages/Analytics';
 import Maintenance from './pages/Maintenance';
 import Evaluation from './pages/Evaluation';
 import {
   getStatus,
+  getPlcsData,
   getCurrentData,
   getHistoryData,
   getModelMetrics,
@@ -17,8 +19,10 @@ import {
 
 function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
+  const [selectedPlc, setSelectedPlc] = useState(1);
   const [backendStatus, setBackendStatus] = useState(true);
   const [statusData, setStatusData] = useState(null);
+  const [plcsList, setPlcsList] = useState([]);
   const [currentData, setCurrentData] = useState(null);
   const [historyData, setHistoryData] = useState(null);
   const [modelData, setModelData] = useState(null);
@@ -29,7 +33,6 @@ function App() {
 
   const consecutiveFailuresRef = useRef(0);
 
-  // Initial fetch for static model metrics and system status
   useEffect(() => {
     const fetchInitialData = async () => {
       try {
@@ -37,9 +40,7 @@ function App() {
         setStatusData(sData);
         setBackendStatus(true);
         consecutiveFailuresRef.current = 0;
-      } catch (err) {
-        // Do not flag disconnected on single initial mount error
-      }
+      } catch (err) {}
 
       try {
         const mData = await getModelMetrics();
@@ -52,100 +53,109 @@ function App() {
     fetchInitialData();
   }, []);
 
-  // Fixed 1000ms polling loop for visualization only
   useEffect(() => {
     let isSubscribed = true;
+    let timerId = null;
 
     const pollData = async () => {
       try {
-        // Fetch telemetry state in parallel for visualization
-        const [curr, hist, lg, maint] = await Promise.all([
-          getCurrentData(),
-          getHistoryData(),
-          getRecentLogs(),
-          getMaintenanceData(),
+        const [pRes, cRes, hRes, lRes, mRes] = await Promise.all([
+          getPlcsData().catch(() => null),
+          getCurrentData(selectedPlc).catch(() => null),
+          getHistoryData().catch(() => null),
+          getRecentLogs(selectedPlc).catch(() => null),
+          getMaintenanceData(selectedPlc).catch(() => null),
         ]);
 
-        if (isSubscribed) {
-          setCurrentData(curr);
-          setHistoryData(hist);
-          setLogs(lg.logs || []);
-          setMaintenanceData(maint);
-          setAutoPlay(curr.auto_play);
-          setSpeed(curr.simulation_speed);
+        if (!isSubscribed) return;
 
-          // Reset failure counter on successful polling cycle
-          consecutiveFailuresRef.current = 0;
-          setBackendStatus(true);
-        }
+        if (pRes && pRes.plcs) setPlcsList(pRes.plcs);
+        if (cRes) setCurrentData(cRes);
+        if (hRes && hRes.history) setHistoryData(hRes.history);
+        if (lRes && lRes.logs) setLogs(lRes.logs);
+        if (mRes) setMaintenanceData(mRes);
+
+        setBackendStatus(true);
+        consecutiveFailuresRef.current = 0;
       } catch (err) {
+        if (!isSubscribed) return;
+        consecutiveFailuresRef.current += 1;
+        if (consecutiveFailuresRef.current >= 3) {
+          setBackendStatus(false);
+        }
+      } finally {
         if (isSubscribed) {
-          consecutiveFailuresRef.current += 1;
-          // Only show "Disconnected" after 3 consecutive failed polling cycles
-          if (consecutiveFailuresRef.current >= 3) {
-            setBackendStatus(false);
-          }
+          timerId = setTimeout(pollData, 1500);
         }
       }
     };
 
-    // Immediate first fetch
     pollData();
-
-    // Fixed 1-second interval (1000ms) - independent of simulation speed
-    const interval = setInterval(pollData, 1000);
 
     return () => {
       isSubscribed = false;
-      clearInterval(interval);
+      if (timerId) clearTimeout(timerId);
     };
-  }, []);
+  }, [selectedPlc]);
 
-  // Handle control actions (Start, Pause, Next, Reset, Speed)
-  const handleControlAction = async (action, actionSpeed) => {
+  const handleControlAction = async (action, speedVal = 1.0) => {
     try {
-      const targetSpeed = actionSpeed !== undefined ? actionSpeed : speed;
-      const res = await postControlAction(action, targetSpeed);
-
-      if (res) {
+      const res = await postControlAction(action, speedVal);
+      if (action === 'set_speed') setSpeed(speedVal);
+      if (res && typeof res.auto_play === 'boolean') {
         setAutoPlay(res.auto_play);
-        setSpeed(res.simulation_speed);
       }
     } catch (err) {
-      console.error('Control action error:', err);
+      console.error(`Failed to execute control action '${action}':`, err);
     }
   };
 
-  return (
-    <div className="min-h-screen bg-[#F5F7FA] flex flex-col font-sans text-gray-900 antialiased selection:bg-blue-100">
-      {/* Top Bar across entire page */}
-      <TopBar backendStatus={backendStatus} statusData={statusData} />
+  const isCritical = currentData?.machine_status === 'Critical';
 
-      <div className="flex flex-1 overflow-hidden">
-        {/* Left Sidebar */}
-        <Sidebar
-          activeTab={activeTab}
-          setActiveTab={setActiveTab}
-          currentData={currentData}
+  return (
+    <div className="flex h-screen bg-slate-50 font-sans text-gray-800 overflow-hidden">
+      <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} />
+
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        <TopBar
           backendStatus={backendStatus}
-          onControlAction={handleControlAction}
+          activeTab={activeTab}
           speed={speed}
-          setSpeed={setSpeed}
           autoPlay={autoPlay}
+          onControl={handleControlAction}
         />
 
-        {/* Main Content Area */}
-        <main className="flex-1 overflow-y-auto p-6 max-w-[1600px] mx-auto w-full">
+        <main className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6">
           {activeTab === 'dashboard' && (
-            <Dashboard currentData={currentData} historyData={historyData} logs={logs} />
+            <Dashboard
+              plcsList={plcsList}
+              selectedPlc={selectedPlc}
+              setSelectedPlc={setSelectedPlc}
+              currentData={currentData}
+              historyData={historyData}
+              logs={logs}
+            />
           )}
-          {activeTab === 'analytics' && <Analytics historyData={historyData} />}
+
+          {activeTab === 'analytics' && (
+            <Analytics currentData={currentData} historyData={historyData} logs={logs} />
+          )}
+
           {activeTab === 'maintenance' && (
-            <Maintenance maintenanceData={maintenanceData} historyData={historyData} />
+            <Maintenance
+              plcsList={plcsList}
+              selectedPlc={selectedPlc}
+              setSelectedPlc={setSelectedPlc}
+              currentData={currentData}
+              maintenanceData={maintenanceData}
+            />
           )}
+
           {activeTab === 'evaluation' && <Evaluation modelData={modelData} />}
         </main>
       </div>
+
+      <CriticalAlertModal isVisible={isCritical} currentData={currentData} />
     </div>
   );
 }
