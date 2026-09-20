@@ -11,7 +11,10 @@ class Predictor:
     """
     def __init__(self, models_dir=None):
         if models_dir is None:
-            models_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
+            curr_dir = os.path.dirname(os.path.abspath(__file__))
+            m1 = os.path.join(curr_dir, "models")
+            m2 = os.path.join(os.path.dirname(curr_dir), "models")
+            models_dir = m1 if os.path.exists(m1) else (m2 if os.path.exists(m2) else m1)
         self.models_dir = models_dir
         
         # Load scaler

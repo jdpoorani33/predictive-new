@@ -1,33 +1,65 @@
 import axios from 'axios';
 
+const getBaseURL = () => {
+  if (typeof window !== 'undefined') {
+    if (window.location.port === '5173' || window.location.port === '3000') {
+      return 'http://127.0.0.1:8000/api';
+    }
+  }
+  return '/api';
+};
+
 const api = axios.create({
-  baseURL: '/api',
-  timeout: 15000,
+  baseURL: getBaseURL(),
+  timeout: 10000,
+  headers: {
+    'Content-Type': 'application/json',
+  },
 });
 
 export const getStatus = async () => {
-  const res = await api.get('/status');
-  return res.data;
+  try {
+    const res = await api.get('/status');
+    return res.data;
+  } catch (err) {
+    console.error('API Error (getStatus):', err.message);
+    throw err;
+  }
 };
 
 export const getPlcsData = async () => {
-  const res = await api.get('/plcs');
-  return res.data;
+  try {
+    const res = await api.get('/plcs');
+    return res.data;
+  } catch (err) {
+    console.error('API Error (getPlcsData):', err.message);
+    throw err;
+  }
 };
 
 export const getCurrentData = async (plc_id = 1) => {
-  const res = await api.get('/current', { params: { plc_id } });
-  return res.data;
+  try {
+    const res = await api.get('/current', { params: { plc_id } });
+    return res.data;
+  } catch (err) {
+    console.error('API Error (getCurrentData):', err.message);
+    throw err;
+  }
 };
 
-export const getHistoryData = async () => {
-  const res = await api.get('/history');
-  return res.data;
+export const getHistoryData = async (plc_id = 1) => {
+  try {
+    const res = await api.get('/history', { params: { plc_id } });
+    return res.data;
+  } catch (err) {
+    console.error('API Error (getHistoryData):', err.message);
+    throw err;
+  }
 };
 
 export const getModelMetrics = async () => {
   try {
-    const res = await api.get('/model', { timeout: 15000 });
+    const res = await api.get('/model', { timeout: 10000 });
     return res.data;
   } catch (err) {
     console.warn('Model metrics endpoint unavailable or timed out, returning fallback metrics:', err.message);
@@ -44,17 +76,32 @@ export const getModelMetrics = async () => {
 };
 
 export const getRecentLogs = async (plc_id = null) => {
-  const params = plc_id ? { plc_id } : {};
-  const res = await api.get('/logs', { params });
-  return res.data;
+  try {
+    const params = plc_id ? { plc_id } : {};
+    const res = await api.get('/logs', { params });
+    return res.data;
+  } catch (err) {
+    console.error('API Error (getRecentLogs):', err.message);
+    throw err;
+  }
 };
 
 export const getMaintenanceData = async (plc_id = 1) => {
-  const res = await api.get('/maintenance', { params: { plc_id } });
-  return res.data;
+  try {
+    const res = await api.get('/maintenance', { params: { plc_id } });
+    return res.data;
+  } catch (err) {
+    console.error('API Error (getMaintenanceData):', err.message);
+    throw err;
+  }
 };
 
 export const postControlAction = async (action, speed = 1.0) => {
-  const res = await api.post('/control', { action, speed });
-  return res.data;
+  try {
+    const res = await api.post('/control', { action, speed });
+    return res.data;
+  } catch (err) {
+    console.error(`API Error (postControlAction '${action}'):`, err.message);
+    throw err;
+  }
 };

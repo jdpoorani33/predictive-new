@@ -33,6 +33,33 @@ function App() {
 
   const consecutiveFailuresRef = useRef(0);
 
+  const fetchAllData = async (plcId = selectedPlc) => {
+    try {
+      const [pRes, cRes, hRes, lRes, mRes] = await Promise.all([
+        getPlcsData().catch(() => null),
+        getCurrentData(plcId).catch(() => null),
+        getHistoryData(plcId).catch(() => null),
+        getRecentLogs(plcId).catch(() => null),
+        getMaintenanceData(plcId).catch(() => null),
+      ]);
+
+      if (pRes && pRes.plcs) setPlcsList(pRes.plcs);
+      if (cRes) setCurrentData(cRes);
+      if (hRes) setHistoryData(hRes);
+      if (lRes && lRes.logs) setLogs(lRes.logs);
+      if (mRes) setMaintenanceData(mRes);
+
+      setBackendStatus(true);
+      consecutiveFailuresRef.current = 0;
+    } catch (err) {
+      consecutiveFailuresRef.current += 1;
+      if (consecutiveFailuresRef.current >= 3) {
+        setBackendStatus(false);
+      }
+    }
+  };
+
+  // Initial fetch
   useEffect(() => {
     const fetchInitialData = async () => {
       try {
@@ -40,7 +67,9 @@ function App() {
         setStatusData(sData);
         setBackendStatus(true);
         consecutiveFailuresRef.current = 0;
-      } catch (err) {}
+      } catch (err) {
+        setBackendStatus(false);
+      }
 
       try {
         const mData = await getModelMetrics();
@@ -53,6 +82,7 @@ function App() {
     fetchInitialData();
   }, []);
 
+  // Polling loop
   useEffect(() => {
     let isSubscribed = true;
     let timerId = null;
@@ -62,21 +92,29 @@ function App() {
         const [pRes, cRes, hRes, lRes, mRes] = await Promise.all([
           getPlcsData().catch(() => null),
           getCurrentData(selectedPlc).catch(() => null),
-          getHistoryData().catch(() => null),
+          getHistoryData(selectedPlc).catch(() => null),
           getRecentLogs(selectedPlc).catch(() => null),
           getMaintenanceData(selectedPlc).catch(() => null),
         ]);
 
         if (!isSubscribed) return;
 
+        if (pRes || cRes) {
+          setBackendStatus(true);
+          consecutiveFailuresRef.current = 0;
+        } else {
+          consecutiveFailuresRef.current += 1;
+          if (consecutiveFailuresRef.current >= 3) {
+            setBackendStatus(false);
+          }
+        }
+
         if (pRes && pRes.plcs) setPlcsList(pRes.plcs);
         if (cRes) setCurrentData(cRes);
-        if (hRes && hRes.history) setHistoryData(hRes.history);
+        if (hRes) setHistoryData(hRes);
         if (lRes && lRes.logs) setLogs(lRes.logs);
         if (mRes) setMaintenanceData(mRes);
 
-        setBackendStatus(true);
-        consecutiveFailuresRef.current = 0;
       } catch (err) {
         if (!isSubscribed) return;
         consecutiveFailuresRef.current += 1;
@@ -100,10 +138,19 @@ function App() {
 
   const handleControlAction = async (action, speedVal = 1.0) => {
     try {
+      console.log(`Executing control action '${action}'...`);
       const res = await postControlAction(action, speedVal);
       if (action === 'set_speed') setSpeed(speedVal);
+      if (action === 'start') setAutoPlay(true);
+      if (action === 'pause') setAutoPlay(false);
+
       if (res && typeof res.auto_play === 'boolean') {
         setAutoPlay(res.auto_play);
+      }
+
+      // Immediately refresh all data state on next/reset
+      if (action === 'next' || action === 'reset') {
+        await fetchAllData(selectedPlc);
       }
     } catch (err) {
       console.error(`Failed to execute control action '${action}':`, err);
@@ -114,11 +161,21 @@ function App() {
 
   return (
     <div className="flex h-screen bg-slate-50 font-sans text-gray-800 overflow-hidden">
-      <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} />
+      <Sidebar
+        activeTab={activeTab}
+        setActiveTab={setActiveTab}
+        currentData={currentData}
+        backendStatus={backendStatus}
+        onControlAction={handleControlAction}
+        speed={speed}
+        setSpeed={setSpeed}
+        autoPlay={autoPlay}
+      />
 
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <TopBar
           backendStatus={backendStatus}
+          statusData={statusData}
           activeTab={activeTab}
           speed={speed}
           autoPlay={autoPlay}

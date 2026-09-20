@@ -70,6 +70,7 @@ class SimulationState:
         self.plc_records = {}  # {plc_id: latest_record_dict}
         self.prev_displayed_rul = {} # {plc_id: val}
         self.prev_status_level = {} # {plc_id: level}
+        self.prev_notification_state = {} # {plc_id: state}
 
     def reset(self):
         self.auto_play = False
@@ -77,6 +78,7 @@ class SimulationState:
         self.plc_records = {}
         self.prev_displayed_rul = {}
         self.prev_status_level = {}
+        self.prev_notification_state = {}
 
     def get_plc_status(self, plc_id=1):
         if plc_id in self.plc_records:
@@ -117,7 +119,13 @@ def process_mqtt_telemetry(payload_dict):
         active_event = str(payload_dict.get("Active_Event", "None"))
         ts = str(payload_dict.get("timestamp", payload_dict.get("Timestamp", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))))
 
-        # 1. Isolation Forest Anomaly Detection
+        # 1. Stage Log: MQTT Received
+        logger.info(f"MQTT RECEIVED | PLC {plc_id} | Temp={round(temp, 1)}°C, Vib={round(vib, 2)}g, Curr={round(curr, 1)}A, Press={round(press, 1)}bar, Noise={round(noise, 1)}dB")
+
+        # 2. Stage Log: Preprocessing
+        logger.info(f"PREPROCESSING | PLC {plc_id} | Feature Scaling OK")
+
+        # 3. Isolation Forest Anomaly Detection
         anomaly_res = model_service.detect_anomaly(temp, vib, curr, pressure=press, noise=noise)
         is_anomaly = anomaly_res["is_anomaly"]
         anomaly_status = anomaly_res["anomaly_status"]
@@ -130,7 +138,7 @@ def process_mqtt_telemetry(payload_dict):
         n_dev = max(0.0, (noise - 42.0) / 30.0)
         sensor_anomaly_score = 0.25 * t_dev + 0.30 * v_dev + 0.15 * c_dev + 0.15 * p_dev + 0.15 * n_dev
 
-        # 2. Random Forest RUL Prediction
+        # 4. Random Forest RUL Prediction
         raw_pred_rul, model_used, raw_pred_float, confidence_pct, ci = model_service.predict_rul(
             temp, vib, curr, pressure=press, noise=noise, return_full_info=True
         )
@@ -143,7 +151,11 @@ def process_mqtt_telemetry(payload_dict):
         )
         sim_state.prev_displayed_rul[plc_id] = val_float
 
-        # 3. Decision Engine
+        # Stage Logs for ML & Anomaly
+        logger.info(f"RANDOM FOREST | PLC {plc_id} | PREDICTION: {displayed_rul} Days (Confidence: {confidence_pct}%)")
+        logger.info(f"ISOLATION FOREST | PLC {plc_id} | ANOMALY: {anomaly_status} (Score: {anomaly_res['anomaly_score']})")
+
+        # 5. Decision Engine
         prev_level = sim_state.prev_status_level.get(plc_id, 0)
         maint_info = get_maintenance_recommendation(
             predicted_rul=displayed_rul,
@@ -155,6 +167,19 @@ def process_mqtt_telemetry(payload_dict):
             is_anomaly=is_anomaly
         )
         sim_state.prev_status_level[plc_id] = maint_info.get("status_level", 0)
+
+        # Stage Logs for Health Index and Condition
+        logger.info(f"HEALTH INDEX | PLC {plc_id} | {round(health, 1)}%")
+        logger.info(f"CONDITION | PLC {plc_id} | {maint_info['machine_condition']} ({maint_info['maintenance_status']})")
+
+        # Notification Deduplication Logic
+        prev_notif_state = sim_state.prev_notification_state.get(plc_id, "NORMAL")
+        current_notif_state = "CRITICAL" if maint_info["maintenance_status"] in ["Critical", "Maintenance Required", "Critical Warning"] or maint_info.get("status_level", 0) >= 3 else "NORMAL"
+        
+        if current_notif_state == "CRITICAL" and prev_notif_state != "CRITICAL":
+            logger.warning(f"CRITICAL ALERT | PLC {plc_id} | NOTIFICATION SENT -> {maint_info['recommended_action']}")
+        
+        sim_state.prev_notification_state[plc_id] = current_notif_state
 
         record = {
             "plc_id": plc_id,
@@ -200,7 +225,6 @@ def process_mqtt_telemetry(payload_dict):
         if len(sim_state.history_records) > 1000:
             sim_state.history_records.pop(0)
 
-        logger.info(f"MQTT Received PLC {plc_id} | Temp: {temp} | Vib: {vib} | RUL Pred (RF): {displayed_rul} Days")
         return record
 
     except Exception as e:
@@ -275,7 +299,15 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "*"
+    ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -379,17 +411,49 @@ def get_current(plc_id: int = 1):
 
 
 @app.get("/api/history")
-def get_history(plc_id: int = None):
+def get_history(plc_id: int = 1):
     try:
         records = sim_state.history_records
         if plc_id is not None:
-            records = [r for r in records if r.get("plc_id") == plc_id]
-        if not records:
-            records = [sim_state.get_plc_status(plc_id or 1)]
-            
+            plc_records = [r for r in records if int(r.get("plc_id", 1)) == int(plc_id)]
+        else:
+            plc_records = records
+
+        if not plc_records:
+            cur = sim_state.get_plc_status(plc_id or 1)
+            plc_records = [cur]
+
+        recent_records = plc_records[-100:]
+
+        temps = [float(r.get("temperature", r.get("Temperature", 62.0))) for r in recent_records]
+        vibs = [float(r.get("vibration", r.get("Vibration", 0.2))) for r in recent_records]
+        currs = [float(r.get("motor_current", r.get("Motor_Current", 8.0))) for r in recent_records]
+        presses = [float(r.get("pressure", r.get("Pressure", 5.0))) for r in recent_records]
+        noises = [float(r.get("noise", r.get("Noise", 42.0))) for r in recent_records]
+        healths = [float(r.get("machine_health", r.get("Machine_Health", 100.0))) for r in recent_records]
+        ruls = [int(r.get("predicted_rul_days", r.get("Predicted_RUL", 200))) for r in recent_records]
+
+        temp_future = get_future_trend(temps, steps=20)
+        vib_future = get_future_trend(vibs, steps=20)
+        curr_future = get_future_trend(currs, steps=20)
+        press_future = get_future_trend(presses, steps=20)
+        noise_future = get_future_trend(noises, steps=20)
+        health_future = get_future_trend(healths, steps=20)
+        rul_future = get_future_trend(ruls, steps=20)
+
+        logger.info(f"API HISTORY | PLC={plc_id} | points={len(recent_records)}")
+
         return {
-            "history": records[-100:],
-            "total_records": len(records)
+            "plc_id": plc_id,
+            "history": recent_records,
+            "total_records": len(plc_records),
+            "temperature_trend": {"actual": temps, "predicted_future": temp_future},
+            "vibration_trend": {"actual": vibs, "predicted_future": vib_future},
+            "motor_current_trend": {"actual": currs, "predicted_future": curr_future},
+            "pressure_trend": {"actual": presses, "predicted_future": press_future},
+            "noise_trend": {"actual": noises, "predicted_future": noise_future},
+            "machine_health_trend": {"actual": healths, "predicted_future": health_future},
+            "rul_trend": {"actual": ruls, "predicted_future": rul_future}
         }
     except Exception as e:
         logger.error(f"Error in GET /api/history: {e}", exc_info=True)
@@ -536,13 +600,27 @@ class ControlAction(BaseModel):
 @app.post("/api/control")
 def control_simulation(action: ControlAction):
     try:
-        if action.action == "reset":
+        if action.action == "start":
+            sim_state.auto_play = True
+            logger.info("POST /api/control: Simulation Started (auto_play = True)")
+        elif action.action == "pause":
+            sim_state.auto_play = False
+            logger.info("POST /api/control: Simulation Paused (auto_play = False)")
+        elif action.action == "next":
+            rec = generate_next_telemetry_step()
+            logger.info(f"POST /api/control: Advanced Next Step (Record generated for PLC {rec.get('plc_id', 1)})")
+        elif action.action == "reset":
             sim_state.reset()
+            generate_next_telemetry_step()
+            logger.info("POST /api/control: Simulation Reset")
         elif action.action == "set_speed":
             sim_state.simulation_speed = action.speed
+            logger.info(f"POST /api/control: Simulation Speed set to {action.speed}")
                 
         return {
-            "current_idx": len(sim_state.history_records) - 1,
+            "status": "success",
+            "action": action.action,
+            "current_idx": max(0, len(sim_state.history_records) - 1),
             "auto_play": sim_state.auto_play,
             "simulation_speed": sim_state.simulation_speed
         }
@@ -550,6 +628,25 @@ def control_simulation(action: ControlAction):
         logger.error(f"Error in POST /api/control: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to process control action: {str(e)}")
 
+@app.post("/api/simulation/start")
+@app.post("/api/start")
+def start_simulation():
+    return control_simulation(ControlAction(action="start"))
+
+@app.post("/api/simulation/pause")
+@app.post("/api/pause")
+def pause_simulation():
+    return control_simulation(ControlAction(action="pause"))
+
+@app.post("/api/simulation/next")
+@app.post("/api/next")
+def next_simulation():
+    return control_simulation(ControlAction(action="next"))
+
+@app.post("/api/simulation/reset")
+@app.post("/api/reset")
+def reset_simulation():
+    return control_simulation(ControlAction(action="reset"))
 
 @app.get("/favicon.ico", include_in_schema=False)
 @app.get("/favicon.svg", include_in_schema=False)

@@ -69,17 +69,34 @@ const LiveChart = ({ historyData }) => {
   const currentRangeRef = useRef(null);
 
   const metricConfigs = {
-    Temperature: { label: 'Temperature (°C)', key: 'temperature_trend', color: '#2563EB', unit: '°C', minClamp: 55, maxClamp: 85, minSpan: 6, type: 'temperature', dtick: 2, minorDtick: 0.5 },
-    Vibration: { label: 'Vibration RMS (mm/s)', key: 'vibration_trend', color: '#2563EB', unit: 'mm/s', minClamp: 0, maxClamp: 6, minSpan: 1, type: 'vibration', dtick: 0.5, minorDtick: 0.1 },
-    Motor_Current: { label: 'Motor Current (A)', key: 'motor_current_trend', color: '#2563EB', unit: 'A', minClamp: 5, maxClamp: 25, minSpan: 3, type: 'current', dtick: 2, minorDtick: 0.5 },
-    Pressure: { label: 'Pressure (bar)', key: 'pressure_trend', color: '#2563EB', unit: 'bar', minClamp: 1, maxClamp: 12, minSpan: 2, type: 'pressure', dtick: 1, minorDtick: 0.2 },
-    Noise: { label: 'Acoustic Noise (dB)', key: 'noise_trend', color: '#2563EB', unit: 'dB', minClamp: 30, maxClamp: 90, minSpan: 10, type: 'noise', dtick: 5, minorDtick: 1 },
+    Temperature: { label: 'Temperature (°C)', key: 'temperature_trend', fieldName: 'temperature', color: '#2563EB', unit: '°C', minClamp: 55, maxClamp: 85, minSpan: 6, type: 'temperature', dtick: 2, minorDtick: 0.5 },
+    Vibration: { label: 'Vibration RMS (mm/s)', key: 'vibration_trend', fieldName: 'vibration', color: '#2563EB', unit: 'mm/s', minClamp: 0, maxClamp: 6, minSpan: 1, type: 'vibration', dtick: 0.5, minorDtick: 0.1 },
+    Motor_Current: { label: 'Motor Current (A)', key: 'motor_current_trend', fieldName: 'motor_current', color: '#2563EB', unit: 'A', minClamp: 5, maxClamp: 25, minSpan: 3, type: 'current', dtick: 2, minorDtick: 0.5 },
+    Pressure: { label: 'Pressure (bar)', key: 'pressure_trend', fieldName: 'pressure', color: '#2563EB', unit: 'bar', minClamp: 1, maxClamp: 12, minSpan: 2, type: 'pressure', dtick: 1, minorDtick: 0.2 },
+    Noise: { label: 'Acoustic Noise (dB)', key: 'noise_trend', fieldName: 'noise', color: '#2563EB', unit: 'dB', minClamp: 30, maxClamp: 90, minSpan: 10, type: 'noise', dtick: 5, minorDtick: 1 },
   };
 
+  const getMetricTrend = (hData, key, fieldName) => {
+    if (!hData) return { actual: [], predicted_future: [] };
+    if (hData[key] && Array.isArray(hData[key].actual) && hData[key].actual.length > 0) {
+      return hData[key];
+    }
+    const records = Array.isArray(hData) ? hData : (hData.history || []);
+    if (Array.isArray(records) && records.length > 0) {
+      const actual = records.map(r => {
+        const val = r[fieldName] ?? r[fieldName.toLowerCase()] ?? r[fieldName.toUpperCase()];
+        return val !== undefined ? Number(val) : 0;
+      });
+      const lastVal = actual.length > 0 ? actual[actual.length - 1] : 0;
+      const predicted_future = Array.from({ length: 20 }, () => lastVal);
+      return { actual, predicted_future };
+    }
+    return { actual: [], predicted_future: [] };
+  };
 
   const config = metricConfigs[selectedMetric] || metricConfigs.Temperature;
-  const trend = historyData?.[config.key] || { actual: [], predicted_future: [] };
-  const healthTrend = historyData?.machine_health_trend?.actual || [];
+  const trend = getMetricTrend(historyData, config.key, config.fieldName);
+  const healthTrend = getMetricTrend(historyData, 'machine_health_trend', 'machine_health').actual;
 
   const xHist = trend.actual.map((_, i) => i + 1);
   const latestDay = xHist.length > 0 ? xHist[xHist.length - 1] : 1;

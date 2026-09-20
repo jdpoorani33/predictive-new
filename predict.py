@@ -1,58 +1,154 @@
-import joblib
-import pandas as pd
-import numpy as np
 import os
+import json
+import joblib
+import numpy as np
+import pandas as pd
 
-class PredictiveMaintenanceModel:
+class Predictor:
     """
-    Unchanged default behavior: loads models/rf_rul_model.pkl + models/scaler.pkl,
-    exactly as before.
-
-    New, opt-in only: pass model_path explicitly (or set env var RUL_MODEL_PATH)
-    to load a different trained regressor, e.g. models/gb_rul_model.pkl produced
-    by train_gb_model.py. Nothing changes for existing callers that don't opt in.
+    RUL Predictor and Anomaly Detector engine powered exclusively by Random Forest Regressor
+    and Isolation Forest.
     """
-    def __init__(self, model_path=None, scaler_path="models/scaler.pkl"):
-        if model_path is None:
-            model_path = os.environ.get("RUL_MODEL_PATH", "models/rf_rul_model.pkl")
+    def __init__(self, models_dir=None):
+        if models_dir is None:
+            curr_dir = os.path.dirname(os.path.abspath(__file__))
+            m1 = os.path.join(curr_dir, "models")
+            m2 = os.path.join(os.path.dirname(curr_dir), "models")
+            models_dir = m1 if os.path.exists(m1) else (m2 if os.path.exists(m2) else m1)
+        self.models_dir = models_dir
+        
+        # Load scaler
+        scaler_path = os.path.join(self.models_dir, "scaler.pkl")
+        self.scaler = joblib.load(scaler_path) if os.path.exists(scaler_path) else None
+        
+        # Load Random Forest RUL model
+        rf_path = os.path.join(self.models_dir, "rf_rul_model.pkl")
+        if not os.path.exists(rf_path):
+            rf_path = os.path.join(self.models_dir, "random_forest_model.pkl")
+            
+        self.model = None
+        if os.path.exists(rf_path):
+            try:
+                self.model = joblib.load(rf_path)
+            except Exception as e:
+                print(f"Warning: Failed to load RF model: {e}")
+                    
+        self.models = {"Random Forest Regressor": self.model}
+        self.best_model_name = "Random Forest Regressor"
+        self.active_model_name = "Random Forest Regressor"
+        self.available_models = ["Random Forest Regressor"]
+        
+        # Load Isolation Forest for Anomaly Detection
+        iso_path = os.path.join(self.models_dir, "isolation_forest.pkl")
+        if not os.path.exists(iso_path):
+            iso_path = os.path.join(self.models_dir, "isolation_forest_model.pkl")
+        self.iso_forest = joblib.load(iso_path) if os.path.exists(iso_path) else None
+        
+        # Load metrics metadata
+        self.comparison_data = None
+        for cf in ["model_metrics.json", "model_comparison.json"]:
+            cp = os.path.join(self.models_dir, cf)
+            if os.path.exists(cp):
+                try:
+                    with open(cp, "r") as f:
+                        self.comparison_data = json.load(f)
+                    break
+                except Exception as e:
+                    print(f"Warning: Failed to load metrics metadata: {e}")
 
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        if not os.path.exists(model_path):
-            alt_model = os.path.join(base_dir, model_path)
-            if os.path.exists(alt_model):
-                model_path = alt_model
-        if not os.path.exists(scaler_path):
-            alt_scaler = os.path.join(base_dir, scaler_path)
-            if os.path.exists(alt_scaler):
-                scaler_path = alt_scaler
+    def _resolve_model(self, model_name=None):
+        """Resolves active Random Forest model instance."""
+        return self.model, "Random Forest Regressor"
 
-        if os.path.exists(model_path) and os.path.exists(scaler_path):
-            self.model = joblib.load(model_path)
-            self.scaler = joblib.load(scaler_path)
-        else:
-            self.model = None
-            self.scaler = None
-
-    def predict_rul(self, temperature, vibration, current):
+    def predict_rul(self, temperature, vibration, current, pressure=5.0, noise=42.0, model_name=None, return_model_info=False, return_full_info=False):
+        """
+        Predicts Remaining Useful Life (RUL) in Days using Random Forest Regressor.
+        Calculates prediction confidence and uncertainty interval.
+        """
+        active_model_name = "Random Forest Regressor"
         if not self.model or not self.scaler:
+            if return_full_info:
+                return 0, active_model_name, 0.0, 50.0, (0, 0)
+            elif return_model_info:
+                return 0, active_model_name, 0.0
             return 0
             
         df = pd.DataFrame({
-            "Temperature": [temperature],
-            "Vibration": [vibration],
-            "Motor_Current": [current]
+            "Temperature": [float(temperature)],
+            "Vibration": [float(vibration)],
+            "Motor_Current": [float(current)],
+            "Pressure": [float(pressure) if pressure is not None else 5.0],
+            "Noise": [float(noise) if noise is not None else 42.0]
         })
         
         X_scaled = self.scaler.transform(df)
-        rul_pred = self.model.predict(X_scaled)[0]
-        return max(0, int(rul_pred))
+        raw_pred = float(self.model.predict(X_scaled)[0])
+        int_rul = max(0, int(round(raw_pred)))
+        
+        # Calculate Prediction Confidence & Uncertainty interval
+        pred_std = 15.0
+        if hasattr(self.model, "estimators_"):
+            try:
+                tree_preds = [float(t.predict(X_scaled)[0]) for t in self.model.estimators_]
+                pred_std = float(np.std(tree_preds))
+            except Exception:
+                pred_std = 15.0
+        
+        rel_uncertainty = pred_std / max(20.0, raw_pred)
+        confidence_pct = round(max(50.0, min(98.5, 100.0 - (rel_uncertainty * 60.0))), 1)
+        ci_lower = max(0, int(round(raw_pred - 1.96 * pred_std)))
+        ci_upper = int(round(raw_pred + 1.96 * pred_std))
+        
+        if return_full_info:
+            return int_rul, active_model_name, raw_pred, confidence_pct, (ci_lower, ci_upper)
+        elif return_model_info:
+            return int_rul, active_model_name, raw_pred
+        return int_rul
+
+    def detect_anomaly(self, temperature, vibration, current, pressure=5.0, noise=42.0):
+        """
+        Detects machine anomalies using Isolation Forest on 5 sensor inputs.
+        Returns is_anomaly, anomaly_status ('Normal' vs 'Anomaly Detected'), and anomaly_score.
+        """
+        if not self.iso_forest or not self.scaler:
+            return {"is_anomaly": False, "anomaly_status": "Normal", "anomaly_score": 0.0}
+        
+        df = pd.DataFrame({
+            "Temperature": [float(temperature)],
+            "Vibration": [float(vibration)],
+            "Motor_Current": [float(current)],
+            "Pressure": [float(pressure) if pressure is not None else 5.0],
+            "Noise": [float(noise) if noise is not None else 42.0]
+        })
+        
+        X_scaled = self.scaler.transform(df)
+        pred = self.iso_forest.predict(X_scaled)[0]
+        raw_score = float(self.iso_forest.decision_function(X_scaled)[0])
+        
+        is_anomaly = bool(pred == -1)
+        status = "Anomaly Detected" if is_anomaly else "Normal"
+        
+        return {
+            "is_anomaly": is_anomaly,
+            "anomaly_status": status,
+            "anomaly_score": round(raw_score, 3)
+        }
+
+    def get_comparison_data(self):
+        """Returns model evaluation metadata."""
+        return self.comparison_data
+
+    def get_metrics_data(self):
+        """Returns Random Forest metrics metadata."""
+        return self.comparison_data
+
 
 def filter_displayed_rul(raw_prediction, prev_displayed_rul=None, health=100.0):
     """
     Temporal smoothing filter for displayed Remaining Useful Life (RUL).
     - Monotonic non-increasing.
-    - Smoothly decrements (1–3 days per step based on ML prediction and degradation rate).
-    - Preserves gradual day-by-day degradation while tracking raw model predictions closely.
+    - Smoothly decrements (1-3 days per step based on ML prediction and degradation rate).
+    - Preserves gradual day-by-day degradation while tracking raw Random Forest predictions closely.
     - Converges smoothly to 0 when machine reaches terminal state (health = 0%).
     """
     raw_val = float(raw_prediction)
@@ -65,7 +161,7 @@ def filter_displayed_rul(raw_prediction, prev_displayed_rul=None, health=100.0):
         if prev_float <= 0.0:
             return 0.0, 0
 
-        # Dynamic decay target blending day-advance with ML model prediction
+        # Dynamic decay target blending day-advance with Random Forest model prediction
         time_decay_target = prev_float - 1.0
         blended = 0.85 * time_decay_target + 0.15 * raw_val
         
@@ -86,10 +182,9 @@ def filter_displayed_rul(raw_prediction, prev_displayed_rul=None, health=100.0):
     return val_float, int_rul
 
 
-
 def get_future_trend(history_values, steps=20):
     """
-    Extrapolates the next `steps` values based on polynomial trend fitting.
+    Extrapolates the next steps values based on polynomial trend fitting.
     Ensures seamless connection at index 0 to history_values[-1] with growing future uncertainty.
     """
     if len(history_values) < 2:
@@ -122,7 +217,7 @@ def get_future_trend(history_values, steps=20):
     std_dev = max(0.15, min(std_dev, 2.5))
     
     # Project into future with growing uncertainty fan
-    np.random.seed(42)  # Fixed seed for consistent rendering across polling intervals
+    np.random.seed(42)
     future_y = [round(last_val, 2)]
     for i in range(1, steps):
         uncertainty_factor = (i / steps) * 0.75
@@ -130,3 +225,7 @@ def get_future_trend(history_values, steps=20):
         future_y.append(round(float(base_future[i] + noise), 2))
         
     return future_y
+
+
+# Backward compatibility alias
+PredictiveMaintenanceModel = Predictor
