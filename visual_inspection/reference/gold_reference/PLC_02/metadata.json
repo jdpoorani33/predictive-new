@@ -1,0 +1,14 @@
+{
+  "plc_id": "PLC_02",
+  "reference_status": "VALID",
+  "is_valid": true,
+  "version": "v1",
+  "updated_at": "2026-10-07 19:22:39",
+  "image_hash": "05e0b29001",
+  "resolution": "640x640",
+  "quality_score": 100.0,
+  "reasons": [
+    "Gold reference image verified and healthy"
+  ],
+  "path": "C:\\Users\\JD Poorani\\Downloads\\predictive-maintenance-week5\\predictive-maintenance-sashi-work-main\\visual_inspection\\reference\\gold_reference\\PLC_02\\component_01.jpg"
+}
