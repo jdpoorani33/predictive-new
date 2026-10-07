@@ -1,10 +1,15 @@
+<<<<<<< HEAD
 # Python cache / compiled files
+=======
+# Byte-compiled / optimized / DLL files
+>>>>>>> f5ed929a29a67db812f5a0e95a2869a2a04e0214
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
 
+<<<<<<< HEAD
 # Virtual environments
 .venv/
 venv/
@@ -12,6 +17,9 @@ ENV/
 env/
 
 # Python build / packaging
+=======
+# Build and distribution
+>>>>>>> f5ed929a29a67db812f5a0e95a2869a2a04e0214
 build/
 develop-eggs/
 downloads/
@@ -27,6 +35,7 @@ wheels/
 .installed.cfg
 *.egg
 
+<<<<<<< HEAD
 # Node / Frontend dependencies
 node_modules/
 **/node_modules/
@@ -55,12 +64,44 @@ Thumbs.db
 
 # Logs
 *.log
+=======
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Node / Frontend Dependencies & Temp Files
+node_modules/
+**/node_modules/
+**/dist-ssr/
+>>>>>>> f5ed929a29a67db812f5a0e95a2869a2a04e0214
 npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*
 
+<<<<<<< HEAD
 # Test / cache
 .pytest_cache/
 
 # Runtime databases
 data/*.db
+=======
+# Whitelist compiled production frontend distribution so anyone can run without node
+!frontend/dist/
+!frontend/dist/**
+
+# Environment and Local Secrets
+.env
+.env*.local
+*.local
+
+# IDE configurations
+.idea/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+Thumbs.db
+>>>>>>> f5ed929a29a67db812f5a0e95a2869a2a04e0214
+
+key.pem
